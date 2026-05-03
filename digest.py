@@ -1,5 +1,5 @@
 """
-每日要聞摘要推送
+每日要聞摘要推送 —— Telegram Topics（Thread）版
 GitHub Actions 排程執行：每天 GMT 00:00
 依賴：feedparser, requests, google-generativeai
 """
@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 # ── 設定（從 GitHub Secrets 讀取）──────────────────────────────
 GEMINI_API_KEY     = os.environ["GEMINI_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
+TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]  # 群組 ID（負數）
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
@@ -43,26 +43,26 @@ RSS_FEEDS = {
 WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"]
 EMOJIS   = {"国际要闻": "🌐", "香港新闻": "🏙️", "汇丰银行": "🏦", "AI动态": "🤖"}
 
+# Topic 顏色（循環使用，讓每天顏色不同，純美觀）
+TOPIC_COLORS = [7322096, 16766590, 13338331, 9367192, 16749490, 16478047]
 
-# ── 工具：把發布時間轉成「X 小時前」──────────────────────────────
+
+# ── 工具：相對時間 ──────────────────────────────────────────────
 def relative_time(pub):
     if pub is None:
         return "時間未知"
     now = datetime.now(timezone.utc)
-    diff = now - pub
-    minutes = int(diff.total_seconds() / 60)
+    minutes = int((now - pub).total_seconds() / 60)
     if minutes < 60:
         return f"{minutes} 分鐘前"
     hours = minutes // 60
     if hours < 24:
         return f"{hours} 小時前"
-    days = hours // 24
-    return f"{days} 天前"
+    return f"{hours // 24} 天前"
 
 
 # ── RSS 抓取 ────────────────────────────────────────────────────
 def fetch_rss(url, max_items=10):
-    """抓取 RSS，返回帶有來源和發布時間的文章列表"""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
     try:
         feed = feedparser.parse(url)
@@ -72,20 +72,17 @@ def fetch_rss(url, max_items=10):
 
     items = []
     for entry in feed.entries:
-        # 解析發布時間
         pub_dt = None
         try:
             pub_dt = email.utils.parsedate_to_datetime(entry.get("published", ""))
             if pub_dt < cutoff:
-                continue  # 過濾掉48小時以前的文章
+                continue
         except Exception:
-            pass  # 無法解析日期則不過濾，保留文章
+            pass
 
-        # 去掉標題末尾的「- 來源名」（Google News RSS 的格式）
         raw_title = entry.get("title", "")
         title = re.sub(r"\s*-\s*[^-]+$", "", raw_title).strip()
 
-        # 來源名稱：優先從 entry.source 取，備選從標題末尾提取
         source = ""
         if entry.get("source"):
             source = entry["source"].get("title", "")
@@ -108,12 +105,10 @@ def fetch_rss(url, max_items=10):
 
 # ── Gemini 摘要 ─────────────────────────────────────────────────
 def summarize(category, items):
-    """讓 Gemini 篩選並撰寫摘要，返回帶來源和時間的結果"""
     if not items:
         return [{"headline": "暫無新消息", "summary": "過去48小時未找到相關報道。",
                  "source": "", "pub_str": ""}]
 
-    # 給每條新聞加上編號，讓 Gemini 引用 idx
     numbered = "\n".join(
         f"[{i}] {it['title']}" + (f"（{it['source']}）" if it["source"] else "")
         for i, it in enumerate(items)
@@ -134,7 +129,6 @@ def summarize(category, items):
             resp = model.generate_content(prompt)
             text = re.sub(r"```json\s*|```\s*", "", resp.text.strip()).strip()
             parsed = json.loads(text)["items"]
-
             result = []
             for item in parsed:
                 idx = item.get("idx")
@@ -146,38 +140,53 @@ def summarize(category, items):
                     "pub_str":  orig["pub_str"] if orig else "",
                 })
             return result
-
         except Exception as e:
             print(f"  Gemini attempt {attempt+1} failed: {e}")
             time.sleep(2 ** attempt)
 
-    # 降級：直接用標題，保留來源和時間
     return [{
-        "headline": it["title"],
-        "summary":  "（摘要生成失敗）",
-        "source":   it["source"],
-        "pub_str":  it["pub_str"],
+        "headline": it["title"], "summary": "（摘要生成失敗）",
+        "source": it["source"], "pub_str": it["pub_str"],
     } for it in items[:3]]
 
 
-# ── Telegram 推送 ───────────────────────────────────────────────
+# ── Telegram API 工具函數 ───────────────────────────────────────
 def _esc(text):
-    """MarkdownV2 特殊字符轉義"""
     return re.sub(r"([_*\[\]()~`>#+=|{}.!\-\\])", r"\\\1", str(text))
 
 
-def send_telegram(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "MarkdownV2",
-        "disable_web_page_preview": True,
-    }, timeout=15)
+def tg_api(method, payload):
+    """通用 Telegram API 調用"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
+    resp = requests.post(url, json=payload, timeout=15)
     resp.raise_for_status()
     return resp.json()
 
 
+def create_topic(name, color_index=0):
+    """在群組中創建一個新 Topic，返回 message_thread_id"""
+    result = tg_api("createForumTopic", {
+        "chat_id":    TELEGRAM_CHAT_ID,
+        "name":       name,
+        "icon_color": TOPIC_COLORS[color_index % len(TOPIC_COLORS)],
+    })
+    thread_id = result["result"]["message_thread_id"]
+    print(f"  ✅ Topic 已創建：{name}（thread_id={thread_id}）")
+    return thread_id
+
+
+def send_to_topic(text, thread_id):
+    """發送消息到指定 Topic"""
+    return tg_api("sendMessage", {
+        "chat_id":             TELEGRAM_CHAT_ID,
+        "message_thread_id":   thread_id,
+        "text":                text,
+        "parse_mode":          "MarkdownV2",
+        "disable_web_page_preview": True,
+    })
+
+
+# ── 消息構建 ────────────────────────────────────────────────────
 def build_message(date, weekday, digest):
     lines = [f"📰 *{_esc(date)}（週{weekday}）每日要聞*"]
     lines.append("_由 Google News \\+ Gemini 免費版整理_\n")
@@ -187,10 +196,7 @@ def build_message(date, weekday, digest):
         lines.append(f"*{emoji} {_esc(category)}*")
 
         for i, item in enumerate(items, 1):
-            # 標題
             lines.append(f"{i}\\. *{_esc(item['headline'])}*")
-
-            # 來源 + 相對時間（斜體小字）
             meta_parts = []
             if item.get("source"):
                 meta_parts.append(item["source"])
@@ -198,14 +204,12 @@ def build_message(date, weekday, digest):
                 meta_parts.append(item["pub_str"])
             if meta_parts:
                 lines.append(f"_📡 {_esc(' · '.join(meta_parts))}_")
-
-            # 摘要
             lines.append(_esc(item["summary"]))
-            lines.append("")  # 條目間空行
+            lines.append("")
 
-        lines.append("")  # 類別間空行
+        lines.append("")
 
-    lines.append("_💬 直接回覆此訊息可向 AI 追問_")
+    lines.append("_💬 在此 Topic 內直接發問可向 AI 追問_")
     return "\n".join(lines)
 
 
@@ -214,19 +218,27 @@ def main():
     now     = datetime.now(timezone.utc)
     date    = now.strftime("%Y-%m-%d")
     weekday = WEEKDAYS[now.weekday()]
+    # 用日期的天數做顏色索引，讓每天顏色輪換
+    color_idx = now.timetuple().tm_yday
 
+    # 1. 抓取新聞
     digest = {}
     for category, url in RSS_FEEDS.items():
         print(f"\n[{category}] 抓取 RSS...")
         items = fetch_rss(url)
         print(f"  找到 {len(items)} 篇，正在生成摘要...")
         digest[category] = summarize(category, items)
-        time.sleep(1)  # 避免觸發 Gemini rate limit
+        time.sleep(1)
 
+    # 2. 建立今日 Topic
+    print(f"\n建立 Telegram Topic...")
+    topic_name = f"📅 {date}（週{weekday}）"
+    thread_id = create_topic(topic_name, color_idx)
+
+    # 3. 發送摘要到 Topic
     message = build_message(date, weekday, digest)
-    print("\n發送到 Telegram...")
-    result = send_telegram(message)
-    print(f"✅ 成功，message_id={result['result']['message_id']}")
+    result = send_to_topic(message, thread_id)
+    print(f"✅ 推送成功，message_id={result['result']['message_id']}")
 
 
 if __name__ == "__main__":
