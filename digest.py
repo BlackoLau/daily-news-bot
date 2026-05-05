@@ -1,7 +1,7 @@
 """
 每日要聞摘要推送
-GitHub Actions 排程執行：每天 GMT 00:00
 依賴：feedparser, requests, google-generativeai
+推送完畢後把摘要存入 Cloudflare KV，供 Worker 追問時使用
 """
 import os, re, json, time, email.utils
 import feedparser, requests
@@ -9,19 +9,21 @@ import google.generativeai as genai
 from datetime import datetime, timezone, timedelta
 
 # ── 設定（從 GitHub Secrets 讀取）──────────────────────────────
-GEMINI_API_KEY     = os.environ["GEMINI_API_KEY"]
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
+GEMINI_API_KEY      = os.environ["GEMINI_API_KEY"]
+TELEGRAM_BOT_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID    = os.environ["TELEGRAM_CHAT_ID"]
+CF_ACCOUNT_ID       = os.environ["CF_ACCOUNT_ID"]
+CF_API_TOKEN        = os.environ["CF_API_TOKEN"]
+CF_KV_NAMESPACE_ID  = os.environ["CF_KV_NAMESPACE_ID"]
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 
-# ── Google News RSS 搜索 URL ────────────────────────────────────
+# ── Google News RSS ─────────────────────────────────────────────
 RSS_FEEDS = {
     "国际要闻": (
         "https://news.google.com/rss/search"
-        "?q=world+news+when:2d"
-        "&hl=en&gl=US&ceid=US:en"
+        "?q=world+news+when:2d&hl=en&gl=US&ceid=US:en"
     ),
     "香港新闻": (
         "https://news.google.com/rss/search"
@@ -30,18 +32,17 @@ RSS_FEEDS = {
     ),
     "汇丰银行": (
         "https://news.google.com/rss/search"
-        '?q="HSBC"+"Hong+Kong"+when:2d'
-        "&hl=en&gl=HK&ceid=HK:en"
+        '?q="HSBC"+"Hong+Kong"+when:2d&hl=en&gl=HK&ceid=HK:en'
     ),
     "AI动态": (
         "https://news.google.com/rss/search"
-        "?q=artificial+intelligence+OR+%22large+language+model%22+OR+OpenAI+OR+Anthropic+OR+Gemini+when:2d"
-        "&hl=en&gl=US&ceid=US:en"
+        "?q=artificial+intelligence+OR+%22large+language+model%22"
+        "+OR+OpenAI+OR+Anthropic+OR+Gemini+when:2d&hl=en&gl=US&ceid=US:en"
     ),
 }
 
-WEEKDAYS  = ["一", "二", "三", "四", "五", "六", "日"]
-EMOJIS    = {"国际要闻": "🌐", "香港新闻": "🏙️", "汇丰银行": "🏦", "AI动态": "🤖"}
+WEEKDAYS     = ["一", "二", "三", "四", "五", "六", "日"]
+EMOJIS       = {"国际要闻": "🌐", "香港新闻": "🏙️", "汇丰银行": "🏦", "AI动态": "🤖"}
 TOPIC_COLORS = [7322096, 16766590, 13338331, 9367192, 16749490, 16478047]
 
 
@@ -97,11 +98,10 @@ def fetch_rss(url, max_items=10):
         })
         if len(items) >= max_items:
             break
-
     return items
 
 
-# ── Gemini 摘要（全部類別一次調用，節省配額）────────────────────
+# ── Gemini 摘要（全部類別一次調用）─────────────────────────────
 def summarize_all(feeds_items):
     sections = []
     for category, items in feeds_items.items():
@@ -145,7 +145,6 @@ def summarize_all(feeds_items):
             print(f"  Gemini attempt {attempt+1} failed: {e}")
             time.sleep(2 ** attempt)
 
-    # 降級：直接用標題
     return {
         cat: [{"headline": it["title"], "summary": "（摘要生成失敗）",
                "source": it["source"], "pub_str": it["pub_str"]} for it in items[:3]]
@@ -153,17 +152,37 @@ def summarize_all(feeds_items):
     }
 
 
-# ── Telegram 工具函數 ───────────────────────────────────────────
+# ── 存入 Cloudflare KV ──────────────────────────────────────────
+def save_to_kv(date, digest):
+    """把今日摘要以 JSON 存入 Cloudflare KV，key = digest:YYYY-MM-DD"""
+    url = (
+        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
+        f"/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/values/digest:{date}"
+    )
+    # 存 7 天後自動過期（單位：秒）
+    resp = requests.put(
+        url,
+        params={"expiration_ttl": 7 * 24 * 3600},
+        headers={
+            "Authorization": f"Bearer {CF_API_TOKEN}",
+            "Content-Type":  "application/json",
+        },
+        data=json.dumps(digest, ensure_ascii=False),
+        timeout=15,
+    )
+    resp.raise_for_status()
+    print(f"  ✅ 摘要已存入 Cloudflare KV（key=digest:{date}）")
+
+
+# ── Telegram 工具 ───────────────────────────────────────────────
 def _esc(text):
     return re.sub(r"([_*\[\]()~`>#+=|{}.!\-\\])", r"\\\1", str(text))
-
 
 def tg_api(method, payload):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
     resp = requests.post(url, json=payload, timeout=15)
     resp.raise_for_status()
     return resp.json()
-
 
 def create_topic(name, color_index=0):
     result = tg_api("createForumTopic", {
@@ -175,7 +194,6 @@ def create_topic(name, color_index=0):
     print(f"  Topic 已創建：{name}（thread_id={thread_id}）")
     return thread_id
 
-
 def send_to_topic(text, thread_id):
     return tg_api("sendMessage", {
         "chat_id":                  TELEGRAM_CHAT_ID,
@@ -185,12 +203,9 @@ def send_to_topic(text, thread_id):
         "disable_web_page_preview": True,
     })
 
-
-# ── 消息構建 ────────────────────────────────────────────────────
 def build_message(date, weekday, digest):
     lines = [f"📰 *{_esc(date)}（週{weekday}）每日要聞*"]
     lines.append("_由 Google News \\+ Gemini 免費版整理_\n")
-
     for category, items in digest.items():
         emoji = EMOJIS.get(category, "📌")
         lines.append(f"*{emoji} {_esc(category)}*")
@@ -206,7 +221,6 @@ def build_message(date, weekday, digest):
             lines.append(_esc(item["summary"]))
             lines.append("")
         lines.append("")
-
     lines.append("_💬 在此 Topic 內直接發問可向 AI 追問_")
     return "\n".join(lines)
 
@@ -218,7 +232,7 @@ def main():
     weekday   = WEEKDAYS[now.weekday()]
     color_idx = now.timetuple().tm_yday
 
-    # 1. 抓取所有 RSS
+    # 1. 抓取 RSS
     feeds_items = {}
     for category, url in RSS_FEEDS.items():
         print(f"\n[{category}] 抓取 RSS...")
@@ -226,16 +240,19 @@ def main():
         print(f"  找到 {len(items)} 篇")
         feeds_items[category] = items
 
-    # 2. 一次過生成所有摘要（只用 1 次 Gemini 配額）
-    print("\n生成摘要（合併調用）...")
+    # 2. 生成摘要
+    print("\n生成摘要...")
     digest = summarize_all(feeds_items)
 
-    # 3. 建立今日 Topic
-    print("\n建立 Telegram Topic...")
-    topic_name = f"📅 {date}（週{weekday}）"
-    thread_id = create_topic(topic_name, color_idx)
+    # 3. 存入 Cloudflare KV（供追問使用）
+    print("\n存入 Cloudflare KV...")
+    save_to_kv(date, digest)
 
-    # 4. 發送摘要
+    # 4. 建立 Telegram Topic
+    print("\n建立 Telegram Topic...")
+    thread_id = create_topic(f"📅 {date}（週{weekday}）", color_idx)
+
+    # 5. 推送摘要
     message = build_message(date, weekday, digest)
     result = send_to_topic(message, thread_id)
     print(f"✅ 推送成功，message_id={result['result']['message_id']}")
