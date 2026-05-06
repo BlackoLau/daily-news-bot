@@ -1,11 +1,11 @@
 """
 每日要聞摘要推送
-依賴：feedparser, requests, google-generativeai
+依賴：feedparser, requests, google-genai
 推送完畢後把摘要存入 Cloudflare KV，供 Worker 追問時使用
 """
 import os, re, json, time, email.utils
 import feedparser, requests
-import google.generativeai as genai
+from google import genai
 from datetime import datetime, timezone, timedelta
 
 # ── 設定（從 GitHub Secrets 讀取）──────────────────────────────
@@ -16,8 +16,7 @@ CF_ACCOUNT_ID       = os.environ["CF_ACCOUNT_ID"]
 CF_API_TOKEN        = os.environ["CF_API_TOKEN"]
 CF_KV_NAMESPACE_ID  = os.environ["CF_KV_NAMESPACE_ID"]
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ── Google News RSS ─────────────────────────────────────────────
 RSS_FEEDS = {
@@ -124,7 +123,10 @@ def summarize_all(feeds_items):
 
     for attempt in range(3):
         try:
-            resp = model.generate_content(prompt)
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
             text = re.sub(r"```json\s*|```\s*", "", resp.text.strip()).strip()
             parsed = json.loads(text)
             result = {}
@@ -154,12 +156,10 @@ def summarize_all(feeds_items):
 
 # ── 存入 Cloudflare KV ──────────────────────────────────────────
 def save_to_kv(date, digest):
-    """把今日摘要以 JSON 存入 Cloudflare KV，key = digest:YYYY-MM-DD"""
     url = (
         f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
         f"/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/values/digest:{date}"
     )
-    # 存 7 天後自動過期（單位：秒）
     resp = requests.put(
         url,
         params={"expiration_ttl": 7 * 24 * 3600},
@@ -244,7 +244,7 @@ def main():
     print("\n生成摘要...")
     digest = summarize_all(feeds_items)
 
-    # 3. 存入 Cloudflare KV（供追問使用）
+    # 3. 存入 Cloudflare KV
     print("\n存入 Cloudflare KV...")
     save_to_kv(date, digest)
 
