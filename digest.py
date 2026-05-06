@@ -1,11 +1,11 @@
 """
 每日要聞摘要推送
-依賴：feedparser, requests, google-genai
+依賴：feedparser, requests, google-generativeai
 推送完畢後把摘要存入 Cloudflare KV，供 Worker 追問時使用
 """
 import os, re, json, time, email.utils
 import feedparser, requests
-from google import genai
+import google.generativeai as genai
 from datetime import datetime, timezone, timedelta
 
 # ── 設定（從 GitHub Secrets 讀取）──────────────────────────────
@@ -16,7 +16,8 @@ CF_ACCOUNT_ID       = os.environ["CF_ACCOUNT_ID"]
 CF_API_TOKEN        = os.environ["CF_API_TOKEN"]
 CF_KV_NAMESPACE_ID  = os.environ["CF_KV_NAMESPACE_ID"]
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-2.5-flash")
 
 # ── Google News RSS ─────────────────────────────────────────────
 RSS_FEEDS = {
@@ -123,10 +124,7 @@ def summarize_all(feeds_items):
 
     for attempt in range(3):
         try:
-            resp = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-            )
+            resp = model.generate_content(prompt)
             text = re.sub(r"```json\s*|```\s*", "", resp.text.strip()).strip()
             parsed = json.loads(text)
             result = {}
