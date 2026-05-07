@@ -123,7 +123,7 @@ def summarize_all(feeds_items):
 
     for attempt in range(3):
         try:
-            resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+            resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
             text = re.sub(r"```json\s*|```\s*", "", resp.text.strip()).strip()
             parsed = json.loads(text)
             result = {}
