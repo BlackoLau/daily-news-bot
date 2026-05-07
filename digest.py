@@ -17,7 +17,7 @@ CF_API_TOKEN        = os.environ["CF_API_TOKEN"]
 CF_KV_NAMESPACE_ID  = os.environ["CF_KV_NAMESPACE_ID"]
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 # ── Google News RSS ─────────────────────────────────────────────
 RSS_FEEDS = {
