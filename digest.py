@@ -5,7 +5,7 @@
 """
 import os, re, json, time, email.utils
 import feedparser, requests
-import google.generativeai as genai
+from google import genai
 from datetime import datetime, timezone, timedelta
 
 # ── 設定（從 GitHub Secrets 讀取）──────────────────────────────
@@ -16,8 +16,7 @@ CF_ACCOUNT_ID       = os.environ["CF_ACCOUNT_ID"]
 CF_API_TOKEN        = os.environ["CF_API_TOKEN"]
 CF_KV_NAMESPACE_ID  = os.environ["CF_KV_NAMESPACE_ID"]
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash")
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ── Google News RSS ─────────────────────────────────────────────
 RSS_FEEDS = {
@@ -124,7 +123,7 @@ def summarize_all(feeds_items):
 
     for attempt in range(3):
         try:
-            resp = model.generate_content(prompt)
+            resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
             text = re.sub(r"```json\s*|```\s*", "", resp.text.strip()).strip()
             parsed = json.loads(text)
             result = {}
