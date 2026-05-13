@@ -174,7 +174,7 @@ def save_to_kv(date, digest):
 
 # ── Telegram 工具 ───────────────────────────────────────────────
 def _esc(text):
-    return re.sub(r"([_*\[\]()~`>#+=|{}.!\-\\])", r"\\\1", str(text))
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def tg_api(method, payload):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
@@ -197,29 +197,29 @@ def send_to_topic(text, thread_id):
         "chat_id":                  TELEGRAM_CHAT_ID,
         "message_thread_id":        thread_id,
         "text":                     text,
-        "parse_mode":               "MarkdownV2",
+        "parse_mode":               "HTML",
         "disable_web_page_preview": True,
     })
 
 def build_message(date, weekday, digest):
-    lines = [f"📰 *{_esc(date)}（週{weekday}）每日要聞*"]
-    lines.append("_由 Google News \\+ Gemini 免費版整理_\n")
+    lines = [f"📰 <b>{_esc(date)}（週{weekday}）每日要聞</b>"]
+    lines.append("<i>由 Google News + Gemini 整理</i>\n")
     for category, items in digest.items():
         emoji = EMOJIS.get(category, "📌")
-        lines.append(f"*{emoji} {_esc(category)}*")
+        lines.append(f"<b>{emoji} {_esc(category)}</b>")
         for i, item in enumerate(items, 1):
-            lines.append(f"{i}\\. *{_esc(item['headline'])}*")
+            lines.append(f"{i}. <b>{_esc(item['headline'])}</b>")
             meta_parts = []
             if item.get("source"):
                 meta_parts.append(item["source"])
             if item.get("pub_str"):
                 meta_parts.append(item["pub_str"])
             if meta_parts:
-                lines.append(f"_📡 {_esc(' · '.join(meta_parts))}_")
+                lines.append(f"<i>📡 {_esc(' · '.join(meta_parts))}</i>")
             lines.append(_esc(item["summary"]))
             lines.append("")
         lines.append("")
-    lines.append("_💬 在此 Topic 內直接發問可向 AI 追問_")
+    lines.append("<i>💬 在此 Topic 內直接發問可向 AI 追問</i>")
     return "\n".join(lines)
 
 
