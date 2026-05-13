@@ -179,8 +179,6 @@ def _esc(text):
 def tg_api(method, payload):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
     resp = requests.post(url, json=payload, timeout=15)
-    if not resp.ok:
-        print(f"  Telegram error {resp.status_code}: {resp.text}")
     resp.raise_for_status()
     return resp.json()
 
