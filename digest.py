@@ -201,12 +201,12 @@ def send_to_topic(text, thread_id):
         "disable_web_page_preview": True,
     })
 
-def build_message(date, weekday, digest):
-    lines = [f"📰 <b>{_esc(date)}（週{weekday}）每日要聞</b>"]
-    lines.append("<i>由 Google News + Gemini 整理</i>\n")
+def build_messages(date, weekday, digest):
+    messages = []
+    messages.append(f"📰 <b>{_esc(date)}（週{weekday}）每日要聞</b>\n<i>由 Google News + Gemini 整理</i>")
     for category, items in digest.items():
         emoji = EMOJIS.get(category, "📌")
-        lines.append(f"<b>{emoji} {_esc(category)}</b>")
+        lines = [f"<b>{emoji} {_esc(category)}</b>"]
         for i, item in enumerate(items, 1):
             lines.append(f"{i}. <b>{_esc(item['headline'])}</b>")
             meta_parts = []
@@ -218,9 +218,9 @@ def build_message(date, weekday, digest):
                 lines.append(f"<i>📡 {_esc(' · '.join(meta_parts))}</i>")
             lines.append(_esc(item["summary"]))
             lines.append("")
-        lines.append("")
-    lines.append("<i>💬 在此 Topic 內直接發問可向 AI 追問</i>")
-    return "\n".join(lines)
+        messages.append("\n".join(lines))
+    messages.append("<i>💬 在此 Topic 內直接發問可向 AI 追問</i>")
+    return messages
 
 
 # ── 主程序 ──────────────────────────────────────────────────────
@@ -251,8 +251,8 @@ def main():
     thread_id = create_topic(f"📅 {date}（週{weekday}）", color_idx)
 
     # 5. 推送摘要
-    message = build_message(date, weekday, digest)
-    result = send_to_topic(message, thread_id)
+    for message in build_messages(date, weekday, digest):
+        result = send_to_topic(message, thread_id)
     print(f"✅ 推送成功，message_id={result['result']['message_id']}")
 
 
